@@ -1,0 +1,202 @@
+- name: "Receive TLS certificate using Letsencrypt"
+  hosts: aws
+  gather_facts: False
+  remote_user: ec2-user
+  become: True
+  vars_files:
+    - "vars.yml"
+  vars: # these variables are actually constants that should not be changed
+    path_ssl: "/etc/httpd/conf.d/{{ vhost_file }}" # e.g. vhost_file == ssl.conf
+    servername: "ServerName {{ inventory_hostname }}"
+    certfile: "SSLCertificateFile /etc/letsencrypt/live/{{ inventory_hostname }}/cert.pem"
+    keyfile: "SSLCertificateKeyFile /etc/letsencrypt/live/{{ inventory_hostname }}/privkey.pem"
+    options_ssl: "Include /etc/letsencrypt/options-ssl-apache.conf"
+    chainfile: "SSLCertificateChainFile /etc/letsencrypt/live/{{ inventory_hostname }}/chain.pem"
+    debug: True
+
+  tasks:
+    - name: "Add epel repo"
+      yum:
+        name: "https://dl.fedoraproject.org/pub/epel/epel-release-latest-{{ rhel_version }}.noarch.rpm"
+        state: "present"
+
+    - name: "Install epel repo"
+      yum:
+        name: "epel-release"
+        state: "present"
+
+    - name: "Install yum-utils"
+      yum:
+        name: "yum-utils"
+        state: "present"
+
+    - name: "Install apache, and apache ssl module"
+      yum:
+        name: "{{ apache }}"
+        state: "present"
+      vars:
+        apache:
+          - "httpd"
+          - "mod_ssl"
+
+    - name: "Install certbot"
+      yum:
+        name: "python-certbot-apache"
+        state: "present"
+        enablerepo: "rhui-{{ region }}-rhel-server-extras,rhui-{{ region }}-rhel-server-optional"
+
+    - name: "Start apache"
+      systemd:
+        name: "httpd"
+        state: "started"
+
+    - name: "Log"
+      debug:
+        msg: "Note: Make sure the domain {{ inventory_hostname }} has globally propogated at this point, and that the domain is publicly available on port 80 and port 443, otherwise the certbot CA can't conmmunicate with the domain"
+    - name: "Wait for apache on {{ inventory_hostname }}"
+      wait_for:
+        host: "{{ inventory_hostname }}"
+        port: 80
+        timeout: 300
+
+    - name: "Install certificate and configure mod_ssl"
+      block:
+        - name: "httpd configtest"
+          command: "apachectl configtest"
+          register: pre_configtest
+
+      rescue:
+        - name: "Failed with error"
+          debug:
+            msg: "{{ pre_configtest.stderr }}"
+
+        # note: the regexp: /^AH00526/ does not suffice because the source of that error could be another change
+        - name: "Diagnosing apache error"
+          debug: msg="diagnosing..."
+          when: pre_configtest.stderr is match("^AH00526. Syntax error on line .* of /etc/httpd/conf\.d/{{ vhost_file }}.\nSSLCertificateFile. file '/etc/letsencrypt/live/.*/cert\.pem' does not exist or is empty")
+          register: err_cert_ne
+
+        - name: "Replace certfile"
+          replace:
+            path: "{{ path_ssl }}"
+            regexp: "{{ certfile }}"
+            replace: "SSLCertificateFile /etc/pki/tls/certs/localhost.crt"
+
+        - name: "Replace keyfile"
+          replace:
+            path: "{{ path_ssl }}"
+            regexp: "{{ keyfile }}"
+            replace: "SSLCertificateKeyFile /etc/pki/tls/private/localhost.key"
+
+        - name: "Remove servername"
+          lineinfile:
+            path: "{{ path_ssl }}"
+            regexp: "{{ servername }}"
+            state: "absent"
+
+        - name: "Remove chainfile"
+          lineinfile:
+            path: "{{ path_ssl }}"
+            regexp: "{{ chainfile }}"
+            state: "absent"
+
+        - name: "Remove options"
+          lineinfile:
+            path: "{{ path_ssl }}"
+            regexp: "{{ options_ssl }}"
+            state: "absent"
+
+    - name: "Running second configtest"
+      block:
+        - name: "httpd configtest"
+          command: "apachectl configtest"
+          register: post_configtest
+      rescue:
+        - name: "Post-configtest unsuccessful"
+          debug:
+            msg: "There exists an unrelated configuration error in {{ path_ssl }}"
+          when: post_configtest.failed | bool
+
+        - name: "Ending play"
+          meta: "end_play"
+
+    - name: "Find all certs cert for {{ inventory_hostname }}"
+      command: "certbot certificates"
+      register: certs
+
+    - name: "Find existing cert for {{ inventory_hostname }}"
+      debug: msg="A certificate for this domain already exists"
+      register: exists
+      when: inventory_hostname in certs.stdout
+
+    - name: "Select between http and https or strictly https"
+      debug: msg="1"
+      register: enforcement
+      when: not https_only | bool
+      no_log: not debug | bool
+
+    - name: "Select between http and https or strictly https"
+      debug: msg="2"
+      register: enforcement
+      when: https_only | bool
+      no_log: not debug | bool
+
+    # When the apache installer runs, certbot will prompt user interaction for the user to specify which Apache file contains the SSL configuration; the files prompted are files that contain https VirtualHosts, and they are sorted, and displayed by index
+    # The task below also retrieves such files in the same order, but it does so based on a variable defined in this playbook, which allows for more customization
+    # The task may appear brittle, but it is as certain in function as the certbot prompt is
+    - name: "Locate the file that satisfies the certbot prompt"
+      shell: |
+        grep -rw '/etc/httpd/conf.d/' -e '80>' -e '443>' | cut -c19- | grep -e '.conf:<VirtualHost' | sort
+      register: options
+    - debug: var=options
+
+    - name: "Select between http and https or strictly https"
+      debug:
+        msg: "{{ vhost_file }}"
+      register: traffic_opts
+      loop: "{{ options.stdout_lines }}"
+      loop_control:
+        index_var: index
+      when: https_only and item is match("^{{ vhost_file }}")
+      no_log: not debug | bool
+
+    - name: "Find index of {{ vhost_file }}"
+      debug:
+        msg: "{{ traffic_opts | json_query(ssl_line) | json_query('[0]') + 1 }}"
+      vars:
+        ssl_line: '@.results[?msg].index'
+      register: virtualhost 
+      no_log: not debug | bool
+
+    - name: "Finalize options"
+      debug:
+        msg: "{{ virtualhost.msg }}\n{{ enforcement.msg }}\n"
+      register: certbot_options
+
+    # the printf answers certbot prompts that certbot does not have flags for
+    # - those options are:
+    # - 1. allow certbot to configure /etc/httpd/conf.d/ssl.conf
+    # - 2. redirect all traffic to https
+    - name: "Certification through certbot"
+      shell: |
+        printf "{{ certbot_options.msg }}" | certbot run -a webroot -i apache -w /var/www/html --domains "{{ inventory_hostname }}" --email "{{ email }}" --agree-tos
+      register: res
+      ignore_errors: True
+      when: exists.skipped is defined and exists.skipped
+
+    - name: "Test http"
+      wait_for:
+        host: "{{ inventory_hostname }}"
+        port: 80
+      ignore_errors: True
+      register: test_http
+    - debug: var=test_http
+
+    - name: "Test https"
+      wait_for:
+        host: "{{ inventory_hostname }}"
+        port: 443
+      register: test_https
+      ignore_errors: True
+    - debug: var=test_https
+      failed_when: test_https.state != "started"
