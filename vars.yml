@@ -1,5 +1,4 @@
 rhel_version: 7
-region:
 vhost_file: "ssl.conf"
 https_only: True
 email:

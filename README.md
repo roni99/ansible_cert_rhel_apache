@@ -5,10 +5,11 @@
 
 ## 1. Populate variables in vars.yml and in hosts
   - Enter the domain name of the host into [hosts][hosts]
-  - Enter an email and region in [vars.yml][vars] (if region unknown, the value "REGION" is sufficient)
+  - Enter an email in [vars.yml][vars]
 
 ## 2. Retreive the key associated to the instance
   - Edit the path to the private key in [ansible.cfg][cfg]
+  - (note) ensure the private key has the appropriate access permissions (e.g. 400)
 
 ## 3. Running the playbook
   - > `ansible-playbook certify_rhel_apache.yml`

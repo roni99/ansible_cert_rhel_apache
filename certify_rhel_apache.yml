@@ -43,7 +43,7 @@
       yum:
         name: "python-certbot-apache"
         state: "present"
-        enablerepo: "rhui-{{ region }}-rhel-server-extras,rhui-{{ region }}-rhel-server-optional"
+        enablerepo: "rhui-REGION-rhel-server-extras,rhui-REGION-rhel-server-optional"
 
     - name: "Start apache"
       systemd:
